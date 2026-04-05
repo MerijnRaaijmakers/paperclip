@@ -12,7 +12,7 @@ function parseStdoutLine(line: string, ts: string): TranscriptEntry[] {
 
 function buildAdapterConfig(values: CreateConfigValues): Record<string, unknown> {
   return {
-    mastraUrl: values.cwd || "http://localhost:4112",
+    mastraUrl: values.cwd || "http://localhost:4111",
     agentId: values.extraArgs || "coFounder",
     model: values.model || "auto",
     maxTurns: values.maxTurnsPerRun || 20,

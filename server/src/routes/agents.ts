@@ -1405,7 +1405,8 @@ export function agentRoutes(db: Db) {
 
       // Fire board debate asynchronously — if AG2 approves, auto-resolves the approval.
       // If AG2 is unreachable or board escalates, approval stays pending for human review.
-      if (approval) {
+      const createdApproval = approval;
+      if (createdApproval) {
         const requestingAgentId = actor.actorType === "agent" ? actor.actorId : null;
         const hireReason = `Hire request: ${normalizedHireInput.name} (${normalizedHireInput.role}). ` +
           `Capabilities: ${normalizedHireInput.capabilities ?? "not specified"}. ` +
@@ -1413,24 +1414,22 @@ export function agentRoutes(db: Db) {
 
         void mastraApprovalBridgeService(db)
           .attemptBoardApproval(
-            approval.id,
-            requestingAgentId ?? approval.id, // fallback to approval ID if no agent requested
+            createdApproval.id,
+            requestingAgentId ?? createdApproval.id,
             hireReason,
             "hire_agent",
           )
           .then(async (result) => {
             if (result.autoApproved) {
-              // Board approved — activate the agent + fire hire hook
-              const payload = approval.payload as Record<string, unknown>;
+              const payload = createdApproval.payload as Record<string, unknown>;
               const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
               if (payloadAgentId) {
-                await approvalsSvc.approve(approval.id, "board-debate", result.reasoning ?? "Board auto-approved");
+                await approvalsSvc.approve(createdApproval.id, "board-debate", result.reasoning ?? "Board auto-approved");
               }
             }
-            // If not auto-approved, approval stays pending → shows in Paperclip UI + Slack
           })
           .catch((err) => {
-            logger.warn({ err, approvalId: approval.id }, "Board debate for hire failed silently");
+            logger.warn({ err, approvalId: createdApproval.id }, "Board debate for hire failed silently");
           });
       }
     }

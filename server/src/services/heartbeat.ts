@@ -25,7 +25,7 @@ import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
-import { generateMastraAgent, type MastraGenerateResponse } from "./mastra-client.js";
+import { generateMastraAgent, streamMastraAgent, type MastraGenerateResponse } from "./mastra-client.js";
 import { postTaskPickup, postCompletion, postError } from "./slack-activity.js";
 import { costService } from "./costs.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
@@ -2889,11 +2889,16 @@ export function heartbeatService(db: Db) {
         void postTaskPickup(mastraAgentId, issueIdentifier, issueTitle || "Agent invoked").catch(() => {});
 
         try {
-          const mastraResponse = await generateMastraAgent(mastraAgentId, [
-            { role: "user", content: prompt },
-          ]);
+          const mastraResponse = await streamMastraAgent(
+            mastraAgentId,
+            [{ role: "user", content: prompt }],
+            async (chunk) => {
+              // Feed each text chunk to the transcript in real-time
+              await onLog("stdout", chunk);
+            },
+          );
 
-          // Feed tool calls to transcript
+          // Feed tool calls to transcript (captured from the full response)
           if (mastraResponse.toolCalls) {
             for (const call of mastraResponse.toolCalls) {
               await onLog("stdout", JSON.stringify({
@@ -2906,8 +2911,8 @@ export function heartbeatService(db: Db) {
             }
           }
 
-          // Feed response text to transcript
-          await onLog("stdout", `[mastra] Response:\n${mastraResponse.text}\n`);
+          // Log final response marker
+          await onLog("stdout", `\n[mastra] Stream complete. Total length: ${mastraResponse.text.length}\n`);
 
           const usage: UsageSummary = {
             inputTokens: mastraResponse.usage?.promptTokens ?? 0,

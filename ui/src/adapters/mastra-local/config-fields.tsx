@@ -8,9 +8,9 @@ export function MastraConfigFields({ mode, values, set, config, eff, mark, model
           <label className="block text-sm font-medium mb-1">Mastra Server URL</label>
           <input
             type="text"
-            value={values.cwd || "http://localhost:4112"}
+            value={values.cwd || "http://localhost:4111"}
             onChange={(e) => set({ cwd: e.target.value })}
-            placeholder="http://localhost:4112"
+            placeholder="http://localhost:4111"
             className="w-full px-3 py-2 border rounded-md bg-background"
           />
           <p className="text-xs text-muted-foreground mt-1">URL of the Mastra HTTP server</p>
@@ -58,7 +58,7 @@ export function MastraConfigFields({ mode, values, set, config, eff, mark, model
         <label className="block text-sm font-medium mb-1">Mastra Server URL</label>
         <input
           type="text"
-          value={eff("adapterConfig", "mastraUrl", (config.mastraUrl as string) || "http://localhost:4112")}
+          value={eff("adapterConfig", "mastraUrl", (config.mastraUrl as string) || "http://localhost:4111")}
           onChange={(e) => mark("adapterConfig", "mastraUrl", e.target.value)}
           className="w-full px-3 py-2 border rounded-md bg-background"
         />
