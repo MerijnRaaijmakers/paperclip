@@ -886,6 +886,19 @@ export function AgentDetail() {
                 <RotateCcw className="h-3 w-3" />
                 Reset Sessions
               </button>
+              {agent.adapterType === "mastra_local" && (
+                <button
+                  className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    // Navigate to debate creation — could be a modal in the future
+                    window.open(`/workflows?debate=true&agent=${encodeURIComponent(agent.name)}`, "_self");
+                  }}
+                >
+                  <ChevronRight className="h-3 w-3" />
+                  Start Debate
+                </button>
+              )}
               <button
                 className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-destructive"
                 onClick={() => {

@@ -7,6 +7,8 @@ import { stdin, stdout } from "node:process";
 import { pathToFileURL } from "node:url";
 import type { Request as ExpressRequest, RequestHandler } from "express";
 import { and, eq } from "drizzle-orm";
+import { mastraSyncService } from "./services/mastra-sync.js";
+import { pingMastra } from "./services/mastra-client.js";
 import {
   createDb,
   ensurePostgresDatabase,
@@ -713,9 +715,31 @@ export async function startServer(): Promise<StartedServer> {
       }
 
       resolveListen();
+
+      // ── Mastra auto-sync on startup ───────────────────────────────
+      void (async () => {
+        try {
+          const mastraReachable = await pingMastra();
+          if (!mastraReachable) {
+            logger.info("mastra-sync: Mastra server not reachable, skipping auto-sync");
+            return;
+          }
+          const allCompanies = await db.select({ id: companies.id }).from(companies);
+          const syncSvc = mastraSyncService(db);
+          for (const company of allCompanies) {
+            const result = await syncSvc.sync(company.id);
+            logger.info(
+              { companyId: company.id, synced: result.synced, created: result.created, updated: result.updated },
+              "mastra-sync: auto-synced on startup",
+            );
+          }
+        } catch (err) {
+          logger.warn({ err }, "mastra-sync: auto-sync failed (non-fatal)");
+        }
+      })();
     });
   });
-  
+
   if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
       logger.info({ signal }, "Stopping embedded PostgreSQL");

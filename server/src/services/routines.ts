@@ -33,6 +33,7 @@ import { parseCron, validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
+import { getMastraUrl } from "./mastra-client.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running"];
@@ -627,6 +628,49 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
             nextRunAt,
           }, txDb);
           return updated ?? createdRun;
+        }
+
+        // If the assigned agent is Mastra-backed with a workflow mapping, also trigger the workflow
+        const assigneeAgent = await db
+          .select({ adapterType: agents.adapterType, adapterConfig: agents.adapterConfig })
+          .from(agents)
+          .where(eq(agents.id, input.routine.assigneeAgentId))
+          .then((rows) => rows[0] ?? null);
+
+        if (assigneeAgent?.adapterType === "mastra_local") {
+          const config = assigneeAgent.adapterConfig as Record<string, unknown> | null;
+          const workflowId = config?.mastraWorkflowId as string | undefined;
+          if (workflowId) {
+            // Fire-and-forget: start the Mastra workflow with routine context
+            void (async () => {
+              try {
+                const mastraUrl = getMastraUrl();
+                const createRes = await fetch(`${mastraUrl}/api/workflows/${encodeURIComponent(workflowId)}/createRun`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                });
+                if (!createRes.ok) throw new Error(`createRun: ${createRes.status}`);
+                const { runId: wfRunId } = await createRes.json() as { runId: string };
+                await fetch(`${mastraUrl}/api/workflows/${encodeURIComponent(workflowId)}/runs/${wfRunId}/start`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    inputData: {
+                      routineId: input.routine.id,
+                      routineTitle: input.routine.title,
+                      routineDescription: input.routine.description,
+                      issueId: createdIssue.id,
+                      source: input.source,
+                      payload: input.payload,
+                    },
+                  }),
+                });
+                logger.info({ workflowId, routineId: input.routine.id }, "routines: triggered Mastra workflow");
+              } catch (err) {
+                logger.warn({ err, workflowId }, "routines: failed to trigger Mastra workflow (non-fatal)");
+              }
+            })();
+          }
         }
 
         // Keep the dispatch lock until the issue is linked to a queued heartbeat run.

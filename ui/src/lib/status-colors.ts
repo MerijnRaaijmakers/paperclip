@@ -78,6 +78,9 @@ export const statusBadge: Record<string, string> = {
 
 export const statusBadgeDefault = "bg-muted text-muted-foreground";
 
+/** Statuses that get the shine-sweep animation */
+export const statusShine = new Set(["running", "active", "pending_approval"]);
+
 // ---------------------------------------------------------------------------
 // Agent status dot — solid background for small indicator dots
 // ---------------------------------------------------------------------------

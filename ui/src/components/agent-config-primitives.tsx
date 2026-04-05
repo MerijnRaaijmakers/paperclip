@@ -67,6 +67,7 @@ export const adapterLabels: Record<string, string> = {
   hermes_local: "Hermes Agent",
   process: "Process",
   http: "HTTP",
+  mastra_local: "Mastra",
 };
 
 export const roleLabels = AGENT_ROLE_LABELS as Record<string, string>;

@@ -126,6 +126,7 @@ const adapterLabels: Record<string, string> = {
   openclaw_gateway: "OpenClaw Gateway",
   process: "Process",
   http: "HTTP",
+  mastra_local: "Mastra",
 };
 
 const statusDotColor: Record<string, string> = {

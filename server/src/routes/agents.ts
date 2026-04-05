@@ -62,6 +62,7 @@ import {
   loadDefaultAgentInstructionsBundle,
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
+import { mastraSyncService } from "../services/mastra-sync.js";
 
 export function agentRoutes(db: Db) {
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -862,6 +863,15 @@ export function agentRoutes(db: Db) {
       return;
     }
     res.json(result.map((agent) => redactForRestrictedAgentView(agent)));
+  });
+
+  // ── Mastra agent sync ───────────────────────────────────────────────
+  router.post("/companies/:companyId/mastra-sync", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const syncSvc = mastraSyncService(db);
+    const result = await syncSvc.sync(companyId);
+    res.json(result);
   });
 
   router.get("/instance/scheduler-heartbeats", async (req, res) => {

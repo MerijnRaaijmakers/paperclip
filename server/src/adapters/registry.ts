@@ -81,6 +81,12 @@ import {
 } from "hermes-paperclip-adapter";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
+import {
+  execute as mastraExecute,
+  testEnvironment as mastraTestEnvironment,
+  sessionCodec as mastraSessionCodec,
+} from "@paperclipai/adapter-mastra-local/server";
+import { agentConfigurationDoc as mastraAgentConfigurationDoc, models as mastraModels } from "@paperclipai/adapter-mastra-local";
 
 const claudeLocalAdapter: ServerAdapterModule = {
   type: "claude_local",
@@ -188,6 +194,16 @@ const hermesLocalAdapter: ServerAdapterModule = {
   detectModel: () => detectModelFromHermes(),
 };
 
+const mastraLocalAdapter: ServerAdapterModule = {
+  type: "mastra_local",
+  execute: mastraExecute,
+  testEnvironment: mastraTestEnvironment,
+  sessionCodec: mastraSessionCodec,
+  models: mastraModels,
+  supportsLocalAgentJwt: false,
+  agentConfigurationDoc: mastraAgentConfigurationDoc,
+};
+
 const adaptersByType = new Map<string, ServerAdapterModule>(
   [
     claudeLocalAdapter,
@@ -198,6 +214,7 @@ const adaptersByType = new Map<string, ServerAdapterModule>(
     geminiLocalAdapter,
     openclawGatewayAdapter,
     hermesLocalAdapter,
+    mastraLocalAdapter,
     processAdapter,
     httpAdapter,
   ].map((a) => [a.type, a]),

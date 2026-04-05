@@ -30,3 +30,17 @@ export { notifyHireApproved, type NotifyHireApprovedInput } from "./hire-hook.js
 export { publishLiveEvent, subscribeCompanyLiveEvents } from "./live-events.js";
 export { reconcilePersistedRuntimeServicesOnStartup, restartDesiredRuntimeServicesOnStartup } from "./workspace-runtime.js";
 export { createStorageServiceFromConfig, getStorageService } from "../storage/index.js";
+export { mastraSyncService } from "./mastra-sync.js";
+export { listMastraAgents, generateMastraAgent, resumeMastraWorkflow, listMastraWorkflows, pingMastra, getMastraUrl } from "./mastra-client.js";
+export { mastraApprovalBridgeService } from "./mastra-approval-bridge.js";
+export {
+  postTaskPickup,
+  postCompletion,
+  postError,
+  postDelegation,
+  postApprovalRequest,
+  postAutoApproval,
+  postWorkflowProgress,
+} from "./slack-activity.js";
+export { startDebate, startDebateSlack, listAG2Agents, pingAG2 } from "./ag2-client.js";
+export { collaborativeThreadService } from "./collaborative-threads.js";

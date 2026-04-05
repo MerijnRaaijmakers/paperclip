@@ -7,6 +7,7 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { mastraApprovalBridgeService } from "./mastra-approval-bridge.js";
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -165,6 +166,12 @@ export function approvalService(db: Db) {
         }
       }
 
+      // Resume Mastra workflow if this is a workflow_suspend approval
+      if (applied && updated.type === "workflow_suspend") {
+        const bridge = mastraApprovalBridgeService(db);
+        void bridge.resumeFromApproval(updated).catch(() => {});
+      }
+
       return { approval: updated, applied };
     },
 
@@ -182,6 +189,12 @@ export function approvalService(db: Db) {
         if (payloadAgentId) {
           await agentsSvc.terminate(payloadAgentId);
         }
+      }
+
+      // Resume Mastra workflow with rejection if this is a workflow_suspend approval
+      if (applied && updated.type === "workflow_suspend") {
+        const bridge = mastraApprovalBridgeService(db);
+        void bridge.resumeFromApproval(updated).catch(() => {});
       }
 
       return { approval: updated, applied };

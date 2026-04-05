@@ -24,6 +24,8 @@ import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
+import { generateMastraAgent, type MastraGenerateResponse } from "./mastra-client.js";
+import { postTaskPickup, postCompletion, postError } from "./slack-activity.js";
 import { costService } from "./costs.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
@@ -2639,34 +2641,121 @@ export function heartbeatService(db: Db) {
         });
       };
 
-      const adapter = getServerAdapter(agent.adapterType);
-      const authToken = adapter.supportsLocalAgentJwt
-        ? createLocalAgentJwt(agent.id, agent.companyId, agent.adapterType, run.id)
-        : null;
-      if (adapter.supportsLocalAgentJwt && !authToken) {
-        logger.warn(
-          {
-            companyId: agent.companyId,
-            agentId: agent.id,
-            runId: run.id,
-            adapterType: agent.adapterType,
+      // ── Mastra direct execution path ──────────────────────────────────
+      // For mastra_local agents, bypass the adapter system and call Mastra's
+      // HTTP API directly. This is the core of the Mastra integration.
+      let adapterResult: AdapterExecutionResult;
+
+      if (agent.adapterType === "mastra_local") {
+        const mastraAgentId = (agent.adapterConfig as Record<string, unknown>)?.mastraAgentId;
+        if (!mastraAgentId || typeof mastraAgentId !== "string") {
+          throw new Error(`Agent ${agent.id} has adapterType mastra_local but no mastraAgentId in adapterConfig`);
+        }
+
+        // Build prompt from issue context (loaded at L2086) + wake reason
+        const issueTitle = issueContext?.title ?? readNonEmptyString(context.taskKey) ?? "";
+        const wakeReason = readNonEmptyString(context.wakeReason) ?? "on_demand";
+        const promptParts: string[] = [];
+        if (issueTitle) promptParts.push(`Task: ${issueTitle}`);
+        // Issue description is not in the lightweight issueContext query — check context snapshot
+        const issueDesc = readNonEmptyString(context.issueDescription) ?? "";
+        if (issueDesc) promptParts.push(issueDesc);
+        if (!issueTitle && !issueDesc) promptParts.push(`You have been invoked. Wake reason: ${wakeReason}`);
+        const prompt = promptParts.join("\n\n");
+
+        const ts = new Date().toISOString();
+        await onLog("stdout", `[mastra] Calling agent '${mastraAgentId}' with prompt:\n${prompt}\n`);
+
+        // Post to Slack: task pickup
+        const issueIdentifier = issueContext?.identifier ?? readNonEmptyString(context.taskKey) ?? run.id.slice(0, 8);
+        void postTaskPickup(mastraAgentId, issueIdentifier, issueTitle || "Agent invoked").catch(() => {});
+
+        try {
+          const mastraResponse = await generateMastraAgent(mastraAgentId, [
+            { role: "user", content: prompt },
+          ]);
+
+          // Feed tool calls to transcript
+          if (mastraResponse.toolCalls) {
+            for (const call of mastraResponse.toolCalls) {
+              await onLog("stdout", JSON.stringify({
+                kind: "tool_call",
+                ts: new Date().toISOString(),
+                name: call.toolName,
+                input: call.args,
+                toolUseId: call.toolCallId,
+              }) + "\n");
+            }
+          }
+
+          // Feed response text to transcript
+          await onLog("stdout", `[mastra] Response:\n${mastraResponse.text}\n`);
+
+          const usage: UsageSummary = {
+            inputTokens: mastraResponse.usage?.promptTokens ?? 0,
+            outputTokens: mastraResponse.usage?.completionTokens ?? 0,
+          };
+
+          // Post to Slack: completion
+          void postCompletion(mastraAgentId, issueIdentifier, mastraResponse.text.slice(0, 300)).catch(() => {});
+
+          adapterResult = {
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            usage,
+            summary: mastraResponse.text.slice(0, 500),
+            provider: "mastra",
+            model: mastraAgentId,
+            billingType: "subscription" as const,
+            costUsd: 0,
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          await onLog("stderr", `[mastra] Error: ${errMsg}\n`);
+
+          // Post to Slack: error
+          void postError(mastraAgentId, issueIdentifier, errMsg).catch(() => {});
+
+          adapterResult = {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: errMsg,
+            errorCode: "MASTRA_ERROR",
+          };
+        }
+      } else {
+        // ── Standard adapter execution path (unchanged) ───────────────────
+        const adapter = getServerAdapter(agent.adapterType);
+        const authToken = adapter.supportsLocalAgentJwt
+          ? createLocalAgentJwt(agent.id, agent.companyId, agent.adapterType, run.id)
+          : null;
+        if (adapter.supportsLocalAgentJwt && !authToken) {
+          logger.warn(
+            {
+              companyId: agent.companyId,
+              agentId: agent.id,
+              runId: run.id,
+              adapterType: agent.adapterType,
+            },
+            "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
+          );
+        }
+        adapterResult = await adapter.execute({
+          runId: run.id,
+          agent,
+          runtime: runtimeForAdapter,
+          config: runtimeConfig,
+          context,
+          onLog,
+          onMeta: onAdapterMeta,
+          onSpawn: async (meta) => {
+            await persistRunProcessMetadata(run.id, meta);
           },
-          "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
-        );
+          authToken: authToken ?? undefined,
+        });
       }
-      const adapterResult = await adapter.execute({
-        runId: run.id,
-        agent,
-        runtime: runtimeForAdapter,
-        config: runtimeConfig,
-        context,
-        onLog,
-        onMeta: onAdapterMeta,
-        onSpawn: async (meta) => {
-          await persistRunProcessMetadata(run.id, meta);
-        },
-        authToken: authToken ?? undefined,
-      });
       const adapterManagedRuntimeServices = adapterResult.runtimeServices
         ? await persistAdapterManagedRuntimeServices({
             db,

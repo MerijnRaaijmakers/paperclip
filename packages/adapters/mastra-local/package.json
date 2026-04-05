@@ -1,0 +1,14 @@
+{
+  "name": "@paperclipai/adapter-mastra-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts",
+    "./config-fields": "./src/config-fields.tsx"
+  },
+  "dependencies": {
+    "@paperclipai/adapter-utils": "workspace:*"
+  }
+}
