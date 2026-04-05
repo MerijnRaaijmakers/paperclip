@@ -7,9 +7,10 @@
 
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
-import { listMastraWorkflows } from "../services/mastra-client.js";
+import { listMastraWorkflows, getMastraAgentConfig, updateMastraAgentConfig } from "../services/mastra-client.js";
 import { startDebate, startDebateSlack, listAG2Agents } from "../services/ag2-client.js";
 import { collaborativeThreadService } from "../services/collaborative-threads.js";
+import { agentService } from "../services/agents.js";
 import { assertCompanyAccess } from "./authz.js";
 import { logger } from "../middleware/logger.js";
 
@@ -173,6 +174,83 @@ export function mastraRoutes(db: Db) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ err, requestingAgentId }, "mastra-routes: collaboration failed");
+      res.status(502).json({ error: msg });
+    }
+  });
+
+  // ── Agent Config Sync ──────────────────────────────────────────────
+
+  /** Get current Mastra config for an agent (by Paperclip agent ID). */
+  router.get("/agents/:agentId/mastra-config", async (req, res) => {
+    const { agentId } = req.params;
+    try {
+      const agents = agentService(db);
+      const agent = await agents.getById(agentId);
+      if (!agent) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+
+      const adapterConfig = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      const mastraAgentId = adapterConfig.mastraAgentId as string | undefined;
+      if (!mastraAgentId) {
+        res.status(400).json({ error: "Agent has no mastraAgentId in adapterConfig" });
+        return;
+      }
+
+      const mastraConfig = await getMastraAgentConfig(mastraAgentId);
+      res.json({
+        paperclipAgentId: agentId,
+        mastraAgentId,
+        mastraConfig,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err, agentId }, "mastra-routes: failed to get agent config");
+      res.status(502).json({ error: msg });
+    }
+  });
+
+  /** Push config changes to Mastra runtime. */
+  router.post("/agents/:agentId/mastra-config", async (req, res) => {
+    const { agentId } = req.params;
+    const config = req.body as {
+      instructions?: string;
+      model?: string;
+      maxSteps?: number;
+    };
+
+    try {
+      const agents = agentService(db);
+      const agent = await agents.getById(agentId);
+      if (!agent) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+
+      const adapterConfig = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      const mastraAgentId = adapterConfig.mastraAgentId as string | undefined;
+      if (!mastraAgentId) {
+        res.status(400).json({ error: "Agent has no mastraAgentId in adapterConfig" });
+        return;
+      }
+
+      const updated = await updateMastraAgentConfig(mastraAgentId, config);
+
+      // Mirror relevant fields back into Paperclip's adapterConfig
+      const patchedAdapterConfig: Record<string, unknown> = { ...adapterConfig };
+      if (config.model) patchedAdapterConfig.model = config.model;
+      if (config.maxSteps !== undefined) patchedAdapterConfig.maxSteps = config.maxSteps;
+      await agents.update(agentId, { adapterConfig: patchedAdapterConfig });
+
+      res.json({
+        paperclipAgentId: agentId,
+        mastraAgentId,
+        mastraConfig: updated,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err, agentId }, "mastra-routes: failed to update agent config");
       res.status(502).json({ error: msg });
     }
   });

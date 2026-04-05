@@ -36,6 +36,12 @@ export const mastraApi = {
   getWorkflowRun: (workflowId: string, runId: string) =>
     api.get<MastraWorkflowRunStatus>(`/mastra/workflows/${workflowId}/runs/${runId}`),
 
+  // Config sync
+  getAgentMastraConfig: (agentId: string) =>
+    api.get<Record<string, unknown>>(`/agents/${agentId}/mastra-config`),
+  updateAgentMastraConfig: (agentId: string, config: { instructions?: string; model?: string; maxSteps?: number }) =>
+    api.post<Record<string, unknown>>(`/agents/${agentId}/mastra-config`, config),
+
   // AG2 Debates
   listDebateAgents: () => api.get<Record<string, { mastra_agent: string; system_message_preview: string }>>("/ag2/agents"),
   startDebate: (companyId: string, body: {
