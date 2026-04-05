@@ -55,6 +55,7 @@ import {
 } from "../adapters/index.js";
 import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
+import { logger } from "../middleware/logger.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { runClaudeLogin } from "@paperclipai/adapter-claude-local/server";
@@ -70,6 +71,8 @@ import {
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
 import { mastraSyncService } from "../services/mastra-sync.js";
+import { getMastraUrl } from "../services/mastra-client.js";
+import { mastraApprovalBridgeService } from "../services/mastra-approval-bridge.js";
 import { getTelemetryClient } from "../telemetry.js";
 
 export function agentRoutes(db: Db) {
@@ -1399,6 +1402,37 @@ export function agentRoutes(db: Db) {
           userId: actor.actorType === "user" ? actor.actorId : null,
         });
       }
+
+      // Fire board debate asynchronously — if AG2 approves, auto-resolves the approval.
+      // If AG2 is unreachable or board escalates, approval stays pending for human review.
+      if (approval) {
+        const requestingAgentId = actor.actorType === "agent" ? actor.actorId : null;
+        const hireReason = `Hire request: ${normalizedHireInput.name} (${normalizedHireInput.role}). ` +
+          `Capabilities: ${normalizedHireInput.capabilities ?? "not specified"}. ` +
+          `Budget: ${normalizedHireInput.budgetMonthlyCents ? `$${(normalizedHireInput.budgetMonthlyCents / 100).toFixed(2)}/mo` : "not specified"}.`;
+
+        void mastraApprovalBridgeService(db)
+          .attemptBoardApproval(
+            approval.id,
+            requestingAgentId ?? approval.id, // fallback to approval ID if no agent requested
+            hireReason,
+            "hire_agent",
+          )
+          .then(async (result) => {
+            if (result.autoApproved) {
+              // Board approved — activate the agent + fire hire hook
+              const payload = approval.payload as Record<string, unknown>;
+              const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
+              if (payloadAgentId) {
+                await approvalsSvc.approve(approval.id, "board-debate", result.reasoning ?? "Board auto-approved");
+              }
+            }
+            // If not auto-approved, approval stays pending → shows in Paperclip UI + Slack
+          })
+          .catch((err) => {
+            logger.warn({ err, approvalId: approval.id }, "Board debate for hire failed silently");
+          });
+      }
     }
 
     await logActivity(db, {
@@ -1677,7 +1711,42 @@ export function agentRoutes(db: Db) {
       return;
     }
     await assertCanReadAgent(req, existing);
-    res.json(await instructions.getBundle(existing));
+    const bundle = await instructions.getBundle(existing);
+
+    // For mastra_local agents, fetch the system prompt from Mastra and inject as read-only file
+    if (existing.adapterType === "mastra_local") {
+      const cfg = existing.adapterConfig as Record<string, unknown>;
+      const mastraAgentId = (cfg?.mastraAgentId ?? cfg?.agentId) as string | undefined;
+      if (mastraAgentId) {
+        try {
+          const mastraRes = await fetch(`${getMastraUrl()}/api/agents/${encodeURIComponent(mastraAgentId)}`);
+          if (mastraRes.ok) {
+            const agentData = (await mastraRes.json()) as { instructions?: string; name?: string };
+            if (agentData.instructions) {
+              bundle.files = [
+                {
+                  path: "SYSTEM_PROMPT.md",
+                  size: agentData.instructions.length,
+                  language: "markdown",
+                  markdown: true,
+                  isEntryFile: false,
+                  editable: false,
+                  deprecated: false,
+                  virtual: true,
+                },
+                ...bundle.files,
+              ];
+              // Store the content so the read endpoint can serve it
+              (bundle as any)._mastraSystemPrompt = agentData.instructions;
+            }
+          }
+        } catch {
+          // Mastra unreachable — show bundle without system prompt
+        }
+      }
+    }
+
+    res.json(bundle);
   });
 
   router.patch("/agents/:id/instructions-bundle", validate(updateAgentInstructionsBundleSchema), async (req, res) => {
@@ -1741,6 +1810,36 @@ export function agentRoutes(db: Db) {
     if (!relativePath.trim()) {
       res.status(422).json({ error: "Query parameter 'path' is required" });
       return;
+    }
+
+    // Serve Mastra system prompt as virtual read-only file
+    if (relativePath === "SYSTEM_PROMPT.md" && existing.adapterType === "mastra_local") {
+      const cfg = existing.adapterConfig as Record<string, unknown>;
+      const mastraAgentId = (cfg?.mastraAgentId ?? cfg?.agentId) as string | undefined;
+      if (mastraAgentId) {
+        try {
+          const mastraRes = await fetch(`${getMastraUrl()}/api/agents/${encodeURIComponent(mastraAgentId)}`);
+          if (mastraRes.ok) {
+            const agentData = (await mastraRes.json()) as { instructions?: string };
+            if (agentData.instructions) {
+              res.json({
+                path: "SYSTEM_PROMPT.md",
+                size: agentData.instructions.length,
+                language: "markdown",
+                markdown: true,
+                isEntryFile: false,
+                editable: false,
+                deprecated: false,
+                virtual: true,
+                content: agentData.instructions,
+              });
+              return;
+            }
+          }
+        } catch {
+          // fall through to normal file read
+        }
+      }
     }
 
     res.json(await instructions.readFile(existing, relativePath));

@@ -7,7 +7,7 @@ import type { CreateConfigValues } from "@paperclipai/adapter-utils";
 export function getDefaultValues(): Partial<CreateConfigValues> {
   return {
     adapterType: "mastra_local",
-    cwd: "http://localhost:4112",
+    cwd: "http://localhost:4111",
     model: "auto",
     promptTemplate: "",
     heartbeatEnabled: true,
@@ -23,15 +23,15 @@ export function getConfigFields() {
       name: "cwd",
       label: "Mastra Server URL",
       type: "text" as const,
-      placeholder: "http://localhost:4112",
+      placeholder: "http://localhost:4111",
       description: "URL of the Mastra HTTP server",
     },
     {
       name: "extraArgs",
       label: "Mastra Agent ID",
       type: "text" as const,
-      placeholder: "coFounder",
-      description: "Which Mastra agent to route heartbeats to (e.g. coFounder, orchestrator, executor)",
+      placeholder: "co-founder",
+      description: "Which Mastra agent to route heartbeats to (e.g. co-founder, orchestrator, executor)",
     },
   ];
 }

@@ -200,7 +200,8 @@ export function mastraSyncService(db: Db) {
 
       const existingByMastraId = new Map<string, string>();
       for (const row of existingRows) {
-        const mastraId = (row.adapterConfig as Record<string, unknown>)?.mastraAgentId;
+        const cfg = row.adapterConfig as Record<string, unknown>;
+        const mastraId = cfg?.mastraAgentId ?? cfg?.agentId;
         if (typeof mastraId === "string") {
           existingByMastraId.set(mastraId, row.id);
         }

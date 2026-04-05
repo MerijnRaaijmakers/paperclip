@@ -2864,7 +2864,8 @@ export function heartbeatService(db: Db) {
       let adapterResult: AdapterExecutionResult;
 
       if (agent.adapterType === "mastra_local") {
-        const mastraAgentId = (agent.adapterConfig as Record<string, unknown>)?.mastraAgentId;
+        const config = agent.adapterConfig as Record<string, unknown>;
+        const mastraAgentId = (config?.mastraAgentId ?? config?.agentId) as string | undefined;
         if (!mastraAgentId || typeof mastraAgentId !== "string") {
           throw new Error(`Agent ${agent.id} has adapterType mastra_local but no mastraAgentId in adapterConfig`);
         }

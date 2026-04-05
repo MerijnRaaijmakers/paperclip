@@ -88,6 +88,8 @@ import {
   execute as mastraExecute,
   testEnvironment as mastraTestEnvironment,
   sessionCodec as mastraSessionCodec,
+  listSkills as listMastraSkills,
+  syncSkills as syncMastraSkills,
 } from "@paperclipai/adapter-mastra-local/server";
 import { agentConfigurationDoc as mastraAgentConfigurationDoc, models as mastraModels } from "@paperclipai/adapter-mastra-local";
 
@@ -201,6 +203,8 @@ const mastraLocalAdapter: ServerAdapterModule = {
   type: "mastra_local",
   execute: mastraExecute,
   testEnvironment: mastraTestEnvironment,
+  listSkills: listMastraSkills,
+  syncSkills: syncMastraSkills,
   sessionCodec: mastraSessionCodec,
   models: mastraModels,
   supportsLocalAgentJwt: false,

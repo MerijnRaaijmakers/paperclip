@@ -27,8 +27,8 @@ typed workflows, and rate-limit-aware model routing.
 
 ### Configuration
 
-- **Mastra URL**: The Mastra server endpoint (default: http://localhost:4112)
-- **Agent ID**: Which Mastra agent to route to (e.g. "coFounder", "orchestrator", "executor")
+- **Mastra URL**: The Mastra server endpoint (default: http://localhost:4111)
+- **Agent ID**: Which Mastra agent to route to (e.g. "co-founder", "orchestrator", "executor")
 - **Model**: Which model to use — "auto" for rate-limit-aware routing
 
 ### Available Agents

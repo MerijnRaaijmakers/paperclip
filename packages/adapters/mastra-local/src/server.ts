@@ -15,7 +15,7 @@ import type {
   AdapterSkillSnapshot,
 } from "@paperclipai/adapter-utils";
 
-const DEFAULT_MASTRA_URL = "http://localhost:4112";
+const DEFAULT_MASTRA_URL = "http://localhost:4111";
 const CONNECT_TIMEOUT_MS = 5000;
 const EXECUTE_TIMEOUT_MS = 5 * 60 * 1000; // 5 min per heartbeat
 
@@ -30,8 +30,8 @@ interface MastraAdapterConfig {
 
 function parseConfig(config: Record<string, unknown>): MastraAdapterConfig {
   return {
-    mastraUrl: (config.mastraUrl as string) || (config.cwd as string) || DEFAULT_MASTRA_URL,
-    agentId: (config.agentId as string) || (config.model as string) || "coFounder",
+    mastraUrl: (config.mastraHost as string) || (config.mastraUrl as string) || DEFAULT_MASTRA_URL,
+    agentId: (config.mastraAgentId as string) || (config.agentId as string) || "co-founder",
     model: (config.model as string) || "auto",
     maxTurns: (config.maxTurns as number) || 20,
   };
@@ -91,7 +91,7 @@ export async function execute(
   if (ctx.onMeta) {
     await ctx.onMeta({
       adapterType: "mastra_local",
-      command: `POST ${config.mastraUrl}/agent/${config.agentId}/generate`,
+      command: `POST ${config.mastraUrl}/api/agents/${config.agentId}/generate`,
       prompt,
       promptMetrics: { promptLength: prompt.length },
     });
@@ -101,10 +101,12 @@ export async function execute(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), EXECUTE_TIMEOUT_MS);
 
-    const response = await fetch(`${config.mastraUrl}/agent/${config.agentId}/generate`, {
+    const response = await fetch(`${config.mastraUrl}/api/agents/${config.agentId}/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({
+        messages: [{ role: "user", content: prompt }],
+      }),
       signal: controller.signal,
     });
 
@@ -194,7 +196,7 @@ export async function testEnvironment(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
 
-    const response = await fetch(`${config.mastraUrl}/status`, {
+    const response = await fetch(`${config.mastraUrl}/api/agents`, {
       signal: controller.signal,
     });
 
@@ -252,6 +254,115 @@ export const sessionCodec: AdapterSessionCodec = {
   },
   getDisplayId(params: Record<string, unknown> | null): string | null {
     if (!params) return null;
-    return (params.threadId as string) || (params.agentId as string) || null;
+    return (params.threadId as string) || (params.mastraAgentId as string) || (params.agentId as string) || null;
   },
 };
+
+// ─── Skill sync ────────────────────────────────────────────────
+
+import type { AdapterSkillEntry } from "@paperclipai/adapter-utils";
+
+/**
+ * Build a skill snapshot from Mastra agent tools.
+ * Queries Mastra's /api/agents to get all tools across all agents,
+ * then maps them to Paperclip's AdapterSkillEntry format.
+ */
+async function buildMastraSkillSnapshot(
+  config: MastraAdapterConfig,
+  desiredSkills?: string[],
+): Promise<AdapterSkillSnapshot> {
+  const desiredSet = new Set(desiredSkills ?? []);
+  const entries: AdapterSkillEntry[] = [];
+  const warnings: string[] = [];
+
+  try {
+    // Fetch all agents from Mastra
+    const res = await fetch(`${config.mastraUrl}/api/agents`, {
+      signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      warnings.push(`Mastra server returned ${res.status} — cannot list skills`);
+      return {
+        adapterType: "mastra_local",
+        supported: true,
+        mode: "persistent",
+        desiredSkills: desiredSkills ?? [],
+        entries,
+        warnings,
+      };
+    }
+
+    const agents = (await res.json()) as Record<
+      string,
+      { id: string; name: string; tools?: Record<string, { description?: string }> }
+    >;
+
+    // Each Mastra tool becomes a skill entry
+    const seenTools = new Set<string>();
+    for (const [agentKey, agent] of Object.entries(agents)) {
+      for (const [toolKey, tool] of Object.entries(agent.tools ?? {})) {
+        if (seenTools.has(toolKey)) continue; // dedupe across agents
+        seenTools.add(toolKey);
+
+        entries.push({
+          key: toolKey,
+          runtimeName: toolKey,
+          desired: desiredSet.has(toolKey),
+          managed: true,
+          state: desiredSet.has(toolKey) ? "configured" : "available",
+          origin: "company_managed",
+          originLabel: `Mastra agent: ${agentKey}`,
+          readOnly: true, // tools are defined in code, not editable from Paperclip
+          sourcePath: null,
+          targetPath: null,
+          detail: tool.description ?? `Tool from ${agent.name}`,
+        });
+      }
+    }
+
+    // Check for desired skills that don't exist in Mastra
+    for (const desired of desiredSet) {
+      if (!seenTools.has(desired)) {
+        warnings.push(`Desired skill "${desired}" not found in any Mastra agent`);
+        entries.push({
+          key: desired,
+          runtimeName: null,
+          desired: true,
+          managed: true,
+          state: "missing",
+          origin: "external_unknown",
+          originLabel: "Not found in Mastra",
+          readOnly: false,
+          detail: "This skill is not available as a tool on any Mastra agent.",
+        });
+      }
+    }
+
+    entries.sort((a, b) => a.key.localeCompare(b.key));
+  } catch (err) {
+    warnings.push(`Failed to connect to Mastra at ${config.mastraUrl}: ${err}`);
+  }
+
+  return {
+    adapterType: "mastra_local",
+    supported: true,
+    mode: "persistent",
+    desiredSkills: desiredSkills ?? [],
+    entries,
+    warnings,
+  };
+}
+
+export async function listSkills(ctx: AdapterSkillContext): Promise<AdapterSkillSnapshot> {
+  const config = parseConfig(ctx.config);
+  return buildMastraSkillSnapshot(config);
+}
+
+export async function syncSkills(
+  ctx: AdapterSkillContext,
+  desiredSkills: string[],
+): Promise<AdapterSkillSnapshot> {
+  const config = parseConfig(ctx.config);
+  return buildMastraSkillSnapshot(config, desiredSkills);
+}

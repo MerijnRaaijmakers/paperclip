@@ -17,6 +17,13 @@ import { postApprovalRequest, postAutoApproval } from "./slack-activity.js";
 import { logger } from "../middleware/logger.js";
 
 const PAPERCLIP_BASE_URL = process.env.PAPERCLIP_BASE_URL ?? "http://localhost:3100";
+const AG2_URL = process.env.AG2_URL ?? "http://localhost:8081";
+
+// Board participants for group debates (maps to AG2 AGENT_CONFIGS keys)
+const BOARD_AGENTS = ["co-founder", "engineering-lead", "marketing-lead", "scope-guard"];
+
+// Approval types that should go through board debate instead of 1-on-1 chain
+const BOARD_DEBATE_TYPES = new Set(["hire_agent", "workflow_suspend"]);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,15 +86,27 @@ export function mastraApprovalBridgeService(db: Db) {
         .from(agents)
         .where(eq(agents.id, requestedByAgentId))
         .then((rows) => rows[0] ?? null);
-      const mastraAgentId = (requestingAgent?.adapterConfig as Record<string, unknown>)?.mastraAgentId as string ?? "unknown";
+      const reqConfig = requestingAgent?.adapterConfig as Record<string, unknown> | null;
+      const mastraAgentId = (reqConfig?.mastraAgentId ?? reqConfig?.agentId) as string ?? "unknown";
       const reason = payload.suspendPayload?.reason as string ?? payload.suspendPayload?.message as string ?? "Workflow requires approval";
 
-      // Attempt tiered approval first (manager agents auto-approve if within authority)
-      const tieredResult = await mastraApprovalBridgeService(db).attemptTieredApproval(
-        created.id,
-        requestedByAgentId,
-        reason,
-      );
+      // Choose approval path based on type
+      const approvalType = (payload.suspendPayload?.type as string) ?? "workflow_suspend";
+      const useBoard = BOARD_DEBATE_TYPES.has(approvalType);
+
+      const tieredResult = useBoard
+        ? await mastraApprovalBridgeService(db).attemptBoardApproval(
+            created.id,
+            requestedByAgentId,
+            reason,
+            approvalType,
+            payload.suspendPayload?.context as string | undefined,
+          )
+        : await mastraApprovalBridgeService(db).attemptTieredApproval(
+            created.id,
+            requestedByAgentId,
+            reason,
+          );
 
       if (tieredResult.autoApproved) {
         // Post FYI to Slack
@@ -189,7 +208,8 @@ export function mastraApprovalBridgeService(db: Db) {
         if (!manager) break;
         if (manager.adapterType !== "mastra_local") break; // Non-Mastra manager → escalate
 
-        const mastraAgentId = (manager.adapterConfig as Record<string, unknown>)?.mastraAgentId;
+        const mgrConfig = manager.adapterConfig as Record<string, unknown>;
+        const mastraAgentId = (mgrConfig?.mastraAgentId ?? mgrConfig?.agentId) as string | undefined;
         if (!mastraAgentId || typeof mastraAgentId !== "string") break;
 
         // Ask the manager agent for their opinion
@@ -267,6 +287,154 @@ Do not add any other text.`,
         reasoning: null,
         escalatedToHuman: true,
       };
+    },
+
+    /**
+     * Run a board debate via AG2 GroupChat for high-stakes approvals.
+     * Team leads + scope-guard debate the request collectively.
+     * Falls back to tiered (1-on-1) approval if AG2 is unreachable.
+     */
+    attemptBoardApproval: async (
+      approvalId: string,
+      requestingAgentId: string,
+      reason: string,
+      approvalType: string,
+      context?: string,
+    ): Promise<TieredApprovalResult> => {
+      // Look up requesting agent name for the debate prompt
+      const requester = await db
+        .select({ name: agents.name, adapterConfig: agents.adapterConfig })
+        .from(agents)
+        .where(eq(agents.id, requestingAgentId))
+        .then((rows) => rows[0] ?? null);
+
+      const requesterName = requester?.name ?? "Unknown Agent";
+      const reqCfg = requester?.adapterConfig as Record<string, unknown> | null;
+      const mastraId = (reqCfg?.mastraAgentId ?? reqCfg?.agentId) as string ?? "unknown";
+
+      const debatePrompt = `## Board Approval Request
+
+**Type**: ${approvalType}
+**Requested by**: ${requesterName} (${mastraId})
+**Reason**: ${reason}
+${context ? `\n**Additional context**:\n${context}` : ""}
+
+## Your Task
+Debate whether this should be approved. Each board member should weigh in from their perspective:
+- Co-Founder: Business impact, budget, strategic fit
+- Engineering Lead: Technical feasibility, team capacity, risk
+- Marketing Lead: Market need, positioning, customer impact
+- Scope Guard: Is this within our current priorities? Are we overextending?
+
+After discussion, reach a decision. End with exactly one of:
+- "BOARD DECISION: APPROVE — [reasoning]"
+- "BOARD DECISION: ESCALATE — [reasoning why this needs human review]"`;
+
+      try {
+        const res = await fetch(`${AG2_URL}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: debatePrompt,
+            agents: BOARD_AGENTS,
+            max_rounds: 6,
+            speaker_selection: "auto",
+            initiator: "co-founder",
+            slack_channel: process.env.SLACK_OPS_CHANNEL ?? null,
+          }),
+          signal: AbortSignal.timeout(120_000), // 2 min max for the debate
+        });
+
+        if (!res.ok) {
+          logger.warn(
+            { approvalId, status: res.status },
+            "mastra-approval-bridge: AG2 debate failed, falling back to tiered approval",
+          );
+          return mastraApprovalBridgeService(db).attemptTieredApproval(approvalId, requestingAgentId, reason);
+        }
+
+        const debate = (await res.json()) as {
+          conclusion: string;
+          consensus_reached: boolean;
+          messages: Array<{ agent: string; content: string; round: number }>;
+          rounds: number;
+        };
+
+        logger.info(
+          {
+            approvalId,
+            rounds: debate.rounds,
+            consensus: debate.consensus_reached,
+            agents: BOARD_AGENTS,
+          },
+          "mastra-approval-bridge: board debate completed",
+        );
+
+        // Parse conclusion for BOARD DECISION
+        const conclusion = debate.conclusion;
+        const approveMatch = conclusion.match(/BOARD DECISION:\s*APPROVE\s*[—\-]\s*(.*)/is);
+        const escalateMatch = conclusion.match(/BOARD DECISION:\s*ESCALATE\s*[—\-]\s*(.*)/is);
+
+        if (approveMatch) {
+          const reasoning = approveMatch[1]?.trim() || "Board consensus: approved";
+
+          // Auto-approve in DB
+          await db
+            .update(approvals)
+            .set({
+              status: "approved",
+              decisionNote: `Board approved (AG2 debate, ${debate.rounds} rounds): ${reasoning}`,
+              decidedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(approvals.id, approvalId));
+
+          // Post to Slack
+          void postAutoApproval(mastraId, "Board (AG2)", reason, reasoning).catch(() => {});
+
+          return {
+            autoApproved: true,
+            decidedByAgentId: null, // collective decision
+            reasoning: `Board debate (${debate.rounds} rounds): ${reasoning}`,
+            escalatedToHuman: false,
+          };
+        }
+
+        if (escalateMatch) {
+          const reasoning = escalateMatch[1]?.trim() || "Board could not reach consensus";
+
+          logger.info(
+            { approvalId, reasoning },
+            "mastra-approval-bridge: board escalated to human",
+          );
+
+          return {
+            autoApproved: false,
+            decidedByAgentId: null,
+            reasoning: `Board escalated: ${reasoning}`,
+            escalatedToHuman: true,
+          };
+        }
+
+        // No clear decision — treat as escalation
+        logger.warn(
+          { approvalId, conclusion: conclusion.slice(0, 200) },
+          "mastra-approval-bridge: board debate had no clear decision, escalating",
+        );
+        return {
+          autoApproved: false,
+          decidedByAgentId: null,
+          reasoning: `Board debate inconclusive after ${debate.rounds} rounds`,
+          escalatedToHuman: true,
+        };
+      } catch (err) {
+        // AG2 unreachable or timeout — fall back to tiered
+        logger.warn(
+          { err, approvalId },
+          "mastra-approval-bridge: AG2 unreachable, falling back to tiered approval",
+        );
+        return mastraApprovalBridgeService(db).attemptTieredApproval(approvalId, requestingAgentId, reason);
+      }
     },
   };
 }
