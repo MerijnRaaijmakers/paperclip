@@ -73,8 +73,18 @@ import {
   FolderOpen,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
+import { mastraApi } from "../api/mastra";
+import { DebateTranscript } from "../components/DebateTranscript";
 import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
 import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
 import {
@@ -627,6 +637,12 @@ export function AgentDetail() {
   const navigate = useNavigate();
   const [actionError, setActionError] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [debateOpen, setDebateOpen] = useState(false);
+  const [debateTopic, setDebateTopic] = useState("");
+  const [debateAgents, setDebateAgents] = useState(["co-founder", "engineering-lead", "scope-guard"]);
+  const [debateMaxRounds, setDebateMaxRounds] = useState(6);
+  const [debateRunning, setDebateRunning] = useState(false);
+  const [debateResult, setDebateResult] = useState<Awaited<ReturnType<typeof mastraApi.startDebate>> | null>(null);
   const activeView = urlRunId ? "runs" as AgentDetailView : parseAgentDetailView(urlTab ?? null);
   const needsDashboardData = activeView === "dashboard";
   const needsRunData = activeView === "runs" || Boolean(urlRunId);
@@ -988,8 +1004,9 @@ export function AgentDetail() {
                   className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50"
                   onClick={() => {
                     setMoreOpen(false);
-                    // Navigate to debate creation — could be a modal in the future
-                    window.open(`/workflows?debate=true&agent=${encodeURIComponent(agent.name)}`, "_self");
+                    setDebateTopic("");
+                    setDebateResult(null);
+                    setDebateOpen(true);
                   }}
                 >
                   <ChevronRight className="h-3 w-3" />
@@ -1096,14 +1113,19 @@ export function AgentDetail() {
 
       {/* View content */}
       {activeView === "dashboard" && (
-        <AgentOverview
-          agent={agent}
-          runs={heartbeats ?? []}
-          assignedIssues={assignedIssues}
-          runtimeState={runtimeState}
-          agentId={agent.id}
-          agentRouteId={canonicalAgentRef}
-        />
+        <>
+          <AgentOverview
+            agent={agent}
+            runs={heartbeats ?? []}
+            assignedIssues={assignedIssues}
+            runtimeState={runtimeState}
+            agentId={agent.id}
+            agentRouteId={canonicalAgentRef}
+          />
+          {agent.adapterType === "mastra_local" && (
+            <MastraAgentInfoCard agentId={agent.id} />
+          )}
+        </>
       )}
 
       {activeView === "instructions" && (
@@ -1157,6 +1179,118 @@ export function AgentDetail() {
             onSave={(amount) => budgetMutation.mutate(amount)}
             variant="plain"
           />
+        </div>
+      ) : null}
+
+      {/* Debate Dialog */}
+      {agent && (
+        <Dialog open={debateOpen} onOpenChange={setDebateOpen}>
+          <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Start Debate — {agent.name}</DialogTitle>
+            </DialogHeader>
+            {debateResult ? (
+              <DebateTranscript debate={debateResult} />
+            ) : (
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground font-medium">Topic / Question</label>
+                  <Textarea value={debateTopic} onChange={(e) => setDebateTopic(e.target.value)} rows={3} placeholder="What should the team discuss?" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground font-medium">Participating Agents</label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {["co-founder", "engineering-lead", "marketing-lead", "scope-guard", "devil-advocate", "researcher"].map((ak) => (
+                      <label key={ak} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded hover:bg-accent/30 cursor-pointer">
+                        <input type="checkbox" checked={debateAgents.includes(ak)} onChange={(e) => setDebateAgents((p) => e.target.checked ? [...p, ak] : p.filter((a) => a !== ak))} className="rounded border-border" />
+                        {ak}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <label className="text-xs text-muted-foreground font-medium">Max Rounds</label>
+                  <input type="number" value={debateMaxRounds} onChange={(e) => setDebateMaxRounds(Number(e.target.value))} min={2} max={20} className="w-16 rounded-md border border-border px-2 py-1 bg-transparent text-xs font-mono text-center" />
+                </div>
+              </div>
+            )}
+            <DialogFooter>
+              {debateResult ? (
+                <Button variant="outline" onClick={() => { setDebateResult(null); setDebateOpen(false); }}>Close</Button>
+              ) : (
+                <>
+                  <Button variant="outline" onClick={() => setDebateOpen(false)}>Cancel</Button>
+                  <Button disabled={!debateTopic.trim() || debateAgents.length < 2 || debateRunning} onClick={async () => {
+                    if (!resolvedCompanyId) return;
+                    setDebateRunning(true);
+                    try {
+                      const r = await mastraApi.startDebate(resolvedCompanyId, { topic: debateTopic, agents: debateAgents, maxRounds: debateMaxRounds });
+                      setDebateResult(r);
+                    } catch (err) {
+                      setDebateResult({ messages: [], conclusion: `Error: ${err instanceof Error ? err.message : "Unknown"}`, rounds: 0, agents_involved: debateAgents, consensus_reached: false, slack_thread_ts: null });
+                    } finally { setDebateRunning(false); }
+                  }}>
+                    {debateRunning ? "Debating..." : "Start Debate"}
+                  </Button>
+                </>
+              )}
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+    </div>
+  );
+}
+
+/* ---- Mastra Agent Info Card ---- */
+
+function MastraAgentInfoCard({ agentId }: { agentId: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["mastra", "agent-config", agentId],
+    queryFn: () => mastraApi.getAgentMastraConfig(agentId),
+    staleTime: 30_000,
+  });
+
+  if (isLoading) return <Skeleton className="h-24 w-full mt-4" />;
+  if (!data) return null;
+
+  const config = data.mastraConfig as Record<string, unknown> | undefined;
+  const mastraId = data.mastraAgentId as string;
+
+  return (
+    <div className="mt-4 border border-border rounded-lg p-4 space-y-3">
+      <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Mastra Agent</h3>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <span className="text-muted-foreground">Agent ID</span>
+          <p className="font-mono mt-0.5">{mastraId}</p>
+        </div>
+        {config?.modelId != null ? (
+          <div>
+            <span className="text-muted-foreground">Model</span>
+            <p className="font-mono mt-0.5">{String(config.modelId)}</p>
+          </div>
+        ) : null}
+        {config?.provider != null ? (
+          <div>
+            <span className="text-muted-foreground">Provider</span>
+            <p className="font-mono mt-0.5">{String(config.provider)}</p>
+          </div>
+        ) : null}
+        {typeof config?.tools === "object" && config.tools !== null ? (
+          <div>
+            <span className="text-muted-foreground">Tools</span>
+            <p className="font-mono mt-0.5">{Object.keys(config.tools as Record<string, unknown>).length} registered</p>
+          </div>
+        ) : null}
+      </div>
+      {config?.instructions != null ? (
+        <div>
+          <span className="text-muted-foreground text-xs">Instructions</span>
+          <p className="text-xs mt-1 text-foreground/80 line-clamp-3 whitespace-pre-wrap">
+            {String(config.instructions).slice(0, 300)}
+            {String(config.instructions).length > 300 ? "..." : ""}
+          </p>
         </div>
       ) : null}
     </div>
@@ -3957,6 +4091,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
           </div>
         </div>
       )}
+
     </div>
   );
 }
@@ -4129,6 +4264,7 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
           </div>
         </div>
       )}
+
     </div>
   );
 }
